@@ -1,127 +1,106 @@
-import pandas as pd
-import numpy as np
-import pickle
-from sklearn import ensemble
-from sklearn import model_selection
-from sklearn.feature_selection import SelectFromModel
-from sklearn.naive_bayes import GaussianNB
-from sklearn.metrics import confusion_matrix
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.dummy import DummyClassifier
-import os
-import tkinter as tk
-from tkinter import messagebox, filedialog
 import matplotlib.pyplot as plt
-import seaborn as sns
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from scapy.all import *
+import tkinter as tk
+from tkinter import scrolledtext
+import threading
+import time
 
-# Load dataset function
-def load_data(file_path):
-    try:
-        data = pd.read_csv(file_path, sep='|', engine='python')
-        X = data.drop(['Name', 'md5', 'legitimate'], axis=1).values
-        y = data['legitimate'].values
-        return data, X, y
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to load data: {e}")
-        return None, None, None
+traffic_data = []
+time_data = []
+buffer_size = 100  
+sniffing = False
+SPIKE_THRESHOLD = 1000  
 
-# Function to visualize the confusion matrix
-def plot_confusion_matrix(cm, classes, title='Confusion Matrix'):
-    plt.figure(figsize=(6, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-    plt.title(title)
-    plt.ylabel('Actual')
-    plt.xlabel('Predicted')
-    plt.show()
+class RealTimeNIDSApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Real-Time Intrusion Detection System")
+        self.root.geometry("800x600")
+        self.create_widgets()
 
-# Function to run machine learning models
-def run_ml():
-    file_path = filedialog.askopenfilename(title="Select Data File", filetypes=(("CSV Files", "*.csv"),))
-    if not file_path:
-        return
-    
-    data, X, y = load_data(file_path)
-    if X is None or y is None:
-        return
-    
-    # Feature Selection
-    fsel = ensemble.ExtraTreesClassifier().fit(X, y)
-    model = SelectFromModel(fsel, prefit=True)
-    X_new = model.transform(X)
-    nb_features = X_new.shape[1]
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.plot_widget = self.canvas.get_tk_widget()
+        self.plot_widget.pack()
 
-    # Display important features
-    features = []
-    indices = np.argsort(fsel.feature_importances_)[::-1][:nb_features]
-    original_features = data.columns.drop(['Name', 'md5', 'legitimate'])
-    for f in range(nb_features):
-        feature_name = original_features[indices[f]]
-        feature_importance = fsel.feature_importances_[indices[f]]
-        print(f"{f + 1}. feature {feature_name} ({feature_importance:.6f})")
-        features.append(feature_name)
+    def create_widgets(self):
+        control_frame = tk.Frame(self.root)
+        control_frame.pack(side=tk.TOP, fill=tk.X, pady=10)
 
-    # Split Dataset
-    X_train, X_test, y_train, y_test = model_selection.train_test_split(X_new, y, test_size=0.2, random_state=42)
+        self.start_btn = tk.Button(control_frame, text="Start Monitoring", command=self.start_sniffing, bg="green", fg="white")
+        self.start_btn.pack(side=tk.LEFT, padx=10)
 
-    # Define Algorithms
-    algorithms = {
-        "DecisionTree": DecisionTreeClassifier(max_depth=10),
-        "RandomForest": ensemble.RandomForestClassifier(n_estimators=50),
-        "GradientBoosting": ensemble.GradientBoostingClassifier(n_estimators=50),
-        "AdaBoost": ensemble.AdaBoostClassifier(n_estimators=100),
-        "GNB": GaussianNB(),
-        "Baseline": DummyClassifier(strategy='most_frequent')
-    }
+        self.stop_btn = tk.Button(control_frame, text="Stop Monitoring", command=self.stop_sniffing, bg="red", fg="white", state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=10)
 
-    # Evaluate Algorithms
-    results = {}
-    threshold = 0.90
-    for algo_name, clf in algorithms.items():
-        clf.fit(X_train, y_train)
-        score = clf.score(X_test, y_test)
-        results[algo_name] = score
+        tk.Label(control_frame, text=f"Spike Threshold: {SPIKE_THRESHOLD} bytes", font=("Arial", 12)).pack(side=tk.RIGHT, padx=20)
 
-    # Identify the Best Algorithm
-    qualified_algos = {k: v for k, v in results.items() if v >= threshold}
-    if qualified_algos:
-        winner = max(qualified_algos, key=qualified_algos.get)
-        print(f"\nWinner algorithm is {winner} with a {results[winner] * 100:.2f}% success rate")
-        messagebox.showinfo("Result", f"Winner algorithm is {winner} with a {results[winner] * 100:.2f}% success rate")
-    else:
-        best_algo = max(results, key=results.get)
-        print(f"\nNo algorithm met the threshold of {threshold * 100:.2f}%. Best performing algorithm was {best_algo} with {results[best_algo] * 100:.2f}% accuracy.")
-        messagebox.showinfo("Result", f"No algorithm met the threshold. Best performing algorithm was {best_algo} with {results[best_algo] * 100:.2f}% accuracy.")
+        self.plot_frame = tk.Frame(self.root)
+        self.plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-    # Save and Evaluate the Best Model
-    if qualified_algos:
-        if not os.path.exists('classifier'):
-            os.makedirs('classifier')
-        pickle.dump(algorithms[winner], open('classifier/classifier.pkl', 'wb'))
-        pickle.dump(features, open('classifier/features.pkl', 'wb'))
-        messagebox.showinfo("Info", "Model and features saved successfully!")
+        self.log_text = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, height=10)
+        self.log_text.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
 
-        clf = algorithms[winner]
-        predictions = clf.predict(X_test)
-        conf_matrix = confusion_matrix(y_test, predictions)
-        false_positive_rate = (conf_matrix[0][1] / float(sum(conf_matrix[0]))) * 100
-        false_negative_rate = (conf_matrix[1][0] / float(sum(conf_matrix[1]))) * 100
+    def start_sniffing(self):
+        global sniffing
+        sniffing = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        threading.Thread(target=self.sniff_packets, daemon=True).start()
 
-        messagebox.showinfo("Metrics", f"False positive rate: {false_positive_rate:.2f}%\nFalse negative rate: {false_negative_rate:.2f}%")
+    def stop_sniffing(self):
+        global sniffing
+        sniffing = False
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
 
-        # Show the Confusion Matrix
-        plot_confusion_matrix(conf_matrix, classes=['Legitimate', 'Malicious'])
-    else:
-        messagebox.showwarning("Warning", "No model was saved due to unsatisfactory performance.")
+    def sniff_packets(self):
+        sniff(prn=self.process_packet, store=False, stop_filter=self.stop_filter)
 
-# GUI Setup
-root = tk.Tk()
-root.title("Advance threat detection system")
-root.geometry("400x200")
+    def stop_filter(self, packet):
+        return not sniffing
 
-frame = tk.Frame(root)
-frame.pack(pady=20)
+    def process_packet(self, packet):
+        global traffic_data, time_data
+        try:
+            packet_size = len(packet)
+            current_time = time.time()
 
-btn = tk.Button(frame, text="Run Machine Learning Model", command=run_ml)
-btn.pack()
+            
+            traffic_data.append(packet_size)
+            time_data.append(current_time)
 
-root.mainloop()
+            if len(traffic_data) > buffer_size:
+                traffic_data.pop(0)
+                time_data.pop(0)
+
+        
+            if packet_size > SPIKE_THRESHOLD:
+                self.log_text.insert(tk.END, f"Spike detected! Packet size: {packet_size} bytes\n")
+                self.log_text.see(tk.END)
+
+            self.update_plot()
+        except Exception as e:
+            print(f"Error processing packet: {e}")
+
+    def update_plot(self):
+        if len(traffic_data) > 1:
+            self.ax.clear()
+            self.ax.plot(time_data, traffic_data, label="Packet Size")
+            self.ax.axhline(SPIKE_THRESHOLD, color='red', linestyle='--', label="Spike Threshold")
+            self.ax.set_title("Real-Time Network Traffic")
+            self.ax.set_xlabel("Time")
+            self.ax.set_ylabel("Packet Size (bytes)")
+            self.ax.legend(loc="upper right")
+            self.ax.grid()
+            self.canvas.draw()
+
+
+def main():
+    root = tk.Tk()
+    app = RealTimeNIDSApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
